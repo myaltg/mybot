@@ -1,0 +1,90 @@
+// Main entry point.
+
+import 'dotenv/config';
+import { Client, Collection, GatewayIntentBits, Partials } from 'discord.js';
+import express from 'express';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { config } from './utils/config.js';
+import { logger } from './utils/logger.js';
+import { initDatabase } from './db/repository.js';
+import { createOAuthRouter } from './routes/oauthRoutes.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+async function main() {
+  /* ---------- DB ---------- */
+  await initDatabase();
+
+  /* ---------- Discord client ---------- */
+  const client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMembers,   // privileged — enable in Dev Portal!
+      GatewayIntentBits.GuildModeration,
+    ],
+    partials: [Partials.GuildMember, Partials.User],
+  });
+
+  client.commands = new Collection();
+  await loadCommands(client);
+  await loadEvents(client);
+
+  /* ---------- Web server (OAuth) ---------- */
+  const app = express();
+  app.get('/', (_req, res) => res.send('RejoinBot is alive'));
+  app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
+  app.use('/oauth', createOAuthRouter());
+  app.listen(config.web.port, () =>
+    logger.info(`🌐 Web server listening on :${config.web.port}`));
+
+  /* ---------- Login ---------- */
+  await client.login(config.discord.token);
+
+  /* ---------- Graceful shutdown ---------- */
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, async () => {
+      logger.info(`Received ${sig}, shutting down…`);
+      await client.destroy();
+      process.exit(0);
+    });
+  }
+}
+
+async function loadCommands(client) {
+  const dir = path.join(__dirname, 'commands');
+  const files = await fs.readdir(dir);
+  for (const file of files.filter((f) => f.endsWith('.js'))) {
+    const mod = await import(path.join(dir, file));
+    const def = mod.default;
+    // command file can export either a single object or an array of objects
+    const items = Array.isArray(def) ? def : [def];
+    for (const cmd of items) {
+      if (cmd?.data?.name && typeof cmd.execute === 'function') {
+        client.commands.set(cmd.data.name, cmd);
+        logger.debug(`Loaded command /${cmd.data.name}`);
+      }
+    }
+  }
+  logger.info(`📜 Loaded ${client.commands.size} commands`);
+}
+
+async function loadEvents(client) {
+  const dir = path.join(__dirname, 'events');
+  const files = await fs.readdir(dir);
+  for (const file of files.filter((f) => f.endsWith('.js'))) {
+    const mod = await import(path.join(dir, file));
+    const evt = mod.default;
+    if (!evt?.name || typeof evt.execute !== 'function') continue;
+    if (evt.once) client.once(evt.name, (...args) => evt.execute(...args));
+    else client.on(evt.name, (...args) => evt.execute(...args));
+    logger.debug(`Loaded event ${evt.name}`);
+  }
+}
+
+main().catch((err) => {
+  logger.error('Fatal startup error:', err);
+  process.exit(1);
+});

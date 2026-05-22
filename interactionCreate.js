@@ -1,97 +1,78 @@
-// /ban /kick /timeout — simple moderation primitives.
+// /verify panel  -> posts an embed with a "Verify" button that links to OAuth.
 
 import {
   SlashCommandBuilder,
   PermissionFlagsBits,
   EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelType,
 } from 'discord.js';
-import { COLORS } from '../utils/config.js';
+import { config, COLORS } from '../utils/config.js';
+import { getGuildConfig, upsertGuildConfig } from '../db/repository.js';
 
-export const ban = {
+export default {
   data: new SlashCommandBuilder()
-    .setName('ban')
-    .setDescription('Ban a member')
-    .setDefaultMemberPermissions(PermissionFlagsBits.BanMembers)
-    .addUserOption((o) => o.setName('user').setDescription('User to ban').setRequired(true))
-    .addStringOption((o) => o.setName('reason').setDescription('Reason'))
-    .addIntegerOption((o) =>
-      o.setName('delete-days').setDescription('Delete messages from last N days (0–7)')
-        .setMinValue(0).setMaxValue(7)),
-  async execute(interaction) {
-    const user = interaction.options.getUser('user', true);
-    const reason = interaction.options.getString('reason') || 'No reason provided';
-    const days = interaction.options.getInteger('delete-days') ?? 0;
+    .setName('verify')
+    .setDescription('Set up the verification panel')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((s) =>
+      s.setName('panel')
+        .setDescription('Post a verification panel in a channel')
+        .addChannelOption((o) =>
+          o.setName('channel').setDescription('Where to post the panel')
+            .addChannelTypes(ChannelType.GuildText).setRequired(true))
+        .addStringOption((o) =>
+          o.setName('title').setDescription('Panel title'))
+        .addStringOption((o) =>
+          o.setName('description').setDescription('Panel description')))
+    .addSubcommand((s) =>
+      s.setName('set-role')
+        .setDescription('Role to give once verified (optional)')
+        .addRoleOption((o) =>
+          o.setName('role').setDescription('Verified role').setRequired(true))),
 
-    const member = await interaction.guild.members.fetch(user.id).catch(() => null);
-    if (member && !member.bannable) {
-      return interaction.reply({ content: '❌ I cannot ban that user.', ephemeral: true });
+  async execute(interaction) {
+    const sub = interaction.options.getSubcommand();
+    const guildId = interaction.guildId;
+
+    if (sub === 'panel') {
+      const channel = interaction.options.getChannel('channel', true);
+      const title = interaction.options.getString('title') || '🔒 Verification';
+      const desc =
+        interaction.options.getString('description') ||
+        'Click **Verify** below to gain access to the server.\n' +
+        'You will be redirected to Discord to authorize the bot.';
+
+      const url = `${config.oauth.publicUrl}/oauth/start?guild=${guildId}`;
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel('Verify')
+          .setStyle(ButtonStyle.Link)
+          .setURL(url)
+      );
+
+      await channel.send({
+        embeds: [
+          new EmbedBuilder().setColor(COLORS.primary).setTitle(title).setDescription(desc),
+        ],
+        components: [row],
+      });
+
+      return interaction.reply({
+        content: `✅ Panel posted in ${channel}`,
+        ephemeral: true,
+      });
     }
 
-    await interaction.guild.bans.create(user.id, {
-      reason: `${reason} | by ${interaction.user.tag}`,
-      deleteMessageSeconds: days * 86400,
-    });
-
-    return interaction.reply({
-      embeds: [new EmbedBuilder().setColor(COLORS.error).setTitle('🔨 Banned')
-        .setDescription(`**${user.tag}** has been banned.\n**Reason:** ${reason}`)],
-    });
+    if (sub === 'set-role') {
+      const role = interaction.options.getRole('role', true);
+      await upsertGuildConfig(guildId, { verify_role_id: role.id });
+      return interaction.reply({
+        content: `✅ Verified role set to **${role.name}**`,
+        ephemeral: true,
+      });
+    }
   },
 };
-
-export const kick = {
-  data: new SlashCommandBuilder()
-    .setName('kick')
-    .setDescription('Kick a member')
-    .setDefaultMemberPermissions(PermissionFlagsBits.KickMembers)
-    .addUserOption((o) => o.setName('user').setDescription('User to kick').setRequired(true))
-    .addStringOption((o) => o.setName('reason').setDescription('Reason')),
-  async execute(interaction) {
-    const user = interaction.options.getUser('user', true);
-    const reason = interaction.options.getString('reason') || 'No reason provided';
-
-    const member = await interaction.guild.members.fetch(user.id).catch(() => null);
-    if (!member) return interaction.reply({ content: '❌ User not in guild.', ephemeral: true });
-    if (!member.kickable) return interaction.reply({ content: '❌ I cannot kick that user.', ephemeral: true });
-
-    await member.kick(`${reason} | by ${interaction.user.tag}`);
-    return interaction.reply({
-      embeds: [new EmbedBuilder().setColor(COLORS.warn).setTitle('👢 Kicked')
-        .setDescription(`**${user.tag}** has been kicked.\n**Reason:** ${reason}`)],
-    });
-  },
-};
-
-export const timeout = {
-  data: new SlashCommandBuilder()
-    .setName('timeout')
-    .setDescription('Time out a member (mute)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers)
-    .addUserOption((o) => o.setName('user').setDescription('User to timeout').setRequired(true))
-    .addIntegerOption((o) =>
-      o.setName('minutes').setDescription('Duration in minutes (0 to remove)')
-        .setMinValue(0).setMaxValue(40320 /* 28d */).setRequired(true))
-    .addStringOption((o) => o.setName('reason').setDescription('Reason')),
-  async execute(interaction) {
-    const user = interaction.options.getUser('user', true);
-    const minutes = interaction.options.getInteger('minutes', true);
-    const reason = interaction.options.getString('reason') || 'No reason provided';
-
-    const member = await interaction.guild.members.fetch(user.id).catch(() => null);
-    if (!member) return interaction.reply({ content: '❌ User not in guild.', ephemeral: true });
-    if (!member.moderatable) return interaction.reply({ content: '❌ I cannot timeout that user.', ephemeral: true });
-
-    await member.timeout(minutes === 0 ? null : minutes * 60_000,
-      `${reason} | by ${interaction.user.tag}`);
-
-    const title = minutes === 0 ? '🔓 Timeout removed' : '🔇 Timed out';
-    return interaction.reply({
-      embeds: [new EmbedBuilder().setColor(COLORS.warn).setTitle(title)
-        .setDescription(`**${user.tag}** ${minutes === 0
-          ? 'is no longer timed out.' : `for **${minutes} minutes**.`}\n**Reason:** ${reason}`)],
-    });
-  },
-};
-
-// Default export = array so the command loader can iterate.
-export default [ban, kick, timeout];

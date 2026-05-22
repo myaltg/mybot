@@ -1,76 +1,84 @@
-// Re-adds a user to a guild using PUT /guilds/{id}/members/{user.id}.
+// Discord OAuth2 — handles authorize URL, code exchange, refresh, and
+// returns valid access tokens (auto-refreshing as needed).
 
-import { PermissionFlagsBits, AuditLogEvent } from 'discord.js';
 import { config } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
-import { getValidAccessToken } from './oauthService.js';
-import { deleteTokens, logRejoinAttempt } from '../db/repository.js';
+import { saveTokens, getTokens, deleteTokens } from '../db/repository.js';
 
 const API = 'https://discord.com/api/v10';
 
-/**
- * @returns {Promise<{ok: boolean, reason?: string}>}
- */
-export async function forceRejoin(guild, userId, { nickname, roleIds } = {}) {
-  const accessToken = await getValidAccessToken(guild.id, userId);
-  if (!accessToken) {
-    await logRejoinAttempt(guild.id, userId, false, 'no_oauth_token');
-    return { ok: false, reason: 'no_oauth_token' };
-  }
-
-  // Already in guild? race-condition guard
-  const existing = await guild.members.fetch(userId).catch(() => null);
-  if (existing) {
-    await logRejoinAttempt(guild.id, userId, true, 'already_member');
-    return { ok: true, reason: 'already_member' };
-  }
-
-  const payload = { access_token: accessToken };
-  if (nickname) payload.nick = nickname.slice(0, 32);
-  if (Array.isArray(roleIds) && roleIds.length) payload.roles = roleIds;
-
-  const res = await fetch(`${API}/guilds/${guild.id}/members/${userId}`, {
-    method: 'PUT',
-    headers: {
-      Authorization: `Bot ${config.discord.token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
+export function buildAuthorizeUrl(state) {
+  const params = new URLSearchParams({
+    client_id: config.discord.clientId,
+    redirect_uri: config.oauth.redirectUri,
+    response_type: 'code',
+    scope: 'identify guilds.join',
+    state,
+    prompt: 'consent',
   });
-
-  if (res.status === 201 || res.status === 204) {
-    logger.info(`[forceRejoin] ✅ re-added ${userId} → ${guild.name}`);
-    await logRejoinAttempt(guild.id, userId, true, `status_${res.status}`);
-    return { ok: true };
-  }
-
-  const text = await res.text().catch(() => '');
-  logger.warn(`[forceRejoin] ${res.status} for ${userId}@${guild.id}: ${text}`);
-
-  // Token revoked → clean up so we stop retrying
-  if (res.status === 401 || res.status === 403) {
-    await deleteTokens(guild.id, userId);
-  }
-
-  await logRejoinAttempt(guild.id, userId, false, `api_${res.status}`);
-  return { ok: false, reason: `api_${res.status}` };
+  return `https://discord.com/oauth2/authorize?${params.toString()}`;
 }
 
-/** Don't re-add users who were just banned/kicked by a moderator. */
-export async function wasRecentlyBannedOrKicked(guild, userId, windowMs = 5000) {
-  try {
-    const me = guild.members.me;
-    if (!me?.permissions.has(PermissionFlagsBits.ViewAuditLog)) return false;
+export async function exchangeCode(code) {
+  const body = new URLSearchParams({
+    client_id: config.discord.clientId,
+    client_secret: config.discord.clientSecret,
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: config.oauth.redirectUri,
+  });
+  const res = await fetch(`${API}/oauth2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  if (!res.ok) throw new Error(`exchangeCode ${res.status}: ${await res.text()}`);
+  return res.json();
+}
 
-    const cutoff = Date.now() - windowMs;
-    const [bans, kicks] = await Promise.all([
-      guild.fetchAuditLogs({ type: AuditLogEvent.MemberBanAdd, limit: 5 }).catch(() => null),
-      guild.fetchAuditLogs({ type: AuditLogEvent.MemberKick, limit: 5 }).catch(() => null),
-    ]);
-    const hit = (logs) =>
-      logs?.entries.some((e) => e.target?.id === userId && e.createdTimestamp >= cutoff);
-    return hit(bans) || hit(kicks);
-  } catch {
-    return false;
+export async function refreshAccessToken(refreshToken) {
+  const body = new URLSearchParams({
+    client_id: config.discord.clientId,
+    client_secret: config.discord.clientSecret,
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+  });
+  const res = await fetch(`${API}/oauth2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  if (!res.ok) throw new Error(`refreshAccessToken ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+export async function fetchOAuthUser(accessToken) {
+  const res = await fetch(`${API}/users/@me`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error(`fetchOAuthUser ${res.status}`);
+  return res.json();
+}
+
+/** Get a valid access token (refresh if expired), or null if unavailable. */
+export async function getValidAccessToken(guildId, userId) {
+  const row = await getTokens(guildId, userId);
+  if (!row) return null;
+
+  if (row.expires_at && Number(row.expires_at) - Date.now() > 60_000) {
+    return row.access_token;
+  }
+
+  try {
+    const fresh = await refreshAccessToken(row.refresh_token);
+    await saveTokens(guildId, userId, {
+      ...fresh,
+      refresh_token: fresh.refresh_token || row.refresh_token,
+    });
+    return fresh.access_token;
+  } catch (err) {
+    logger.warn(`[oauth] refresh failed for ${userId}@${guildId}:`, err.message);
+    await deleteTokens(guildId, userId);
+    return null;
   }
 }

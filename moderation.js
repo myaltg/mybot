@@ -4,94 +4,103 @@ import {
   EmbedBuilder,
   ChannelType,
 } from 'discord.js';
-import { COLORS } from '../utils/config.js';
+import { config, COLORS } from '../utils/config.js';
 import { getGuildConfig, upsertGuildConfig } from '../db/repository.js';
 
 export default {
   data: new SlashCommandBuilder()
-    .setName('welcome')
-    .setDescription('Configure welcome / goodbye messages')
+    .setName('forcerejoin')
+    .setDescription('Manage automatic re-joining of members who leave')
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand((s) => s.setName('enable').setDescription('Turn on force-rejoin'))
+    .addSubcommand((s) => s.setName('disable').setDescription('Turn off force-rejoin'))
+    .addSubcommand((s) => s.setName('status').setDescription('Show current config'))
+    .addSubcommand((s) => s.setName('link').setDescription('Get the verification link'))
     .addSubcommand((s) =>
-      s.setName('set-welcome')
-        .setDescription('Enable welcome messages in a channel')
-        .addChannelOption((o) =>
-          o.setName('channel').setDescription('Welcome channel')
-            .addChannelTypes(ChannelType.GuildText).setRequired(true))
-        .addStringOption((o) =>
-          o.setName('message').setDescription('Use {user} {server} {memberCount}')))
+      s.setName('exclude-user')
+        .setDescription('Never re-add this user')
+        .addUserOption((o) => o.setName('user').setDescription('User to exclude').setRequired(true))
+    )
     .addSubcommand((s) =>
-      s.setName('set-goodbye')
-        .setDescription('Enable goodbye messages in a channel')
-        .addChannelOption((o) =>
-          o.setName('channel').setDescription('Goodbye channel')
-            .addChannelTypes(ChannelType.GuildText).setRequired(true))
-        .addStringOption((o) =>
-          o.setName('message').setDescription('Use {user} {memberCount}')))
-    .addSubcommand((s) => s.setName('disable-welcome').setDescription('Turn off welcome messages'))
-    .addSubcommand((s) => s.setName('disable-goodbye').setDescription('Turn off goodbye messages'))
-    .addSubcommand((s) => s.setName('status').setDescription('Show current welcome/goodbye config')),
+      s.setName('exclude-role')
+        .setDescription('Skip members who had this role')
+        .addRoleOption((o) => o.setName('role').setDescription('Role to exclude').setRequired(true))
+    ),
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
     const guildId = interaction.guildId;
     const cfg = await getGuildConfig(guildId);
 
-    if (sub === 'set-welcome') {
-      const channel = interaction.options.getChannel('channel', true);
-      const message = interaction.options.getString('message') || cfg.welcome_message;
-      await upsertGuildConfig(guildId, {
-        welcome_enabled: true,
-        welcome_channel_id: channel.id,
-        welcome_message: message,
+    if (sub === 'enable') {
+      await upsertGuildConfig(guildId, { force_rejoin_enabled: true });
+      return interaction.reply({
+        embeds: [embed(COLORS.success, '✅ Force-Rejoin Enabled',
+          `Members who authorized the bot will be auto-added back when they leave.\n\nShare the verification link with \`/forcerejoin link\`.`)],
+        ephemeral: true,
       });
-      return reply(interaction, COLORS.success, '✅ Welcome enabled',
-        `Channel: ${channel}\nMessage: \`${message}\``);
     }
 
-    if (sub === 'set-goodbye') {
-      const channel = interaction.options.getChannel('channel', true);
-      const message = interaction.options.getString('message') || cfg.goodbye_message;
-      await upsertGuildConfig(guildId, {
-        goodbye_enabled: true,
-        goodbye_channel_id: channel.id,
-        goodbye_message: message,
+    if (sub === 'disable') {
+      await upsertGuildConfig(guildId, { force_rejoin_enabled: false });
+      return interaction.reply({
+        embeds: [embed(COLORS.error, '🛑 Force-Rejoin Disabled', 'Members will not be auto-re-added.')],
+        ephemeral: true,
       });
-      return reply(interaction, COLORS.success, '✅ Goodbye enabled',
-        `Channel: ${channel}\nMessage: \`${message}\``);
-    }
-
-    if (sub === 'disable-welcome') {
-      await upsertGuildConfig(guildId, { welcome_enabled: false });
-      return reply(interaction, COLORS.error, '🛑 Welcome disabled', 'No welcome messages will be sent.');
-    }
-
-    if (sub === 'disable-goodbye') {
-      await upsertGuildConfig(guildId, { goodbye_enabled: false });
-      return reply(interaction, COLORS.error, '🛑 Goodbye disabled', 'No goodbye messages will be sent.');
     }
 
     if (sub === 'status') {
       return interaction.reply({
         embeds: [
-          new EmbedBuilder().setColor(COLORS.info).setTitle('Welcome / Goodbye').addFields(
-            { name: 'Welcome', value: cfg.welcome_enabled
-              ? `✅ <#${cfg.welcome_channel_id}>\n\`${cfg.welcome_message}\``
-              : '❌ Disabled' },
-            { name: 'Goodbye', value: cfg.goodbye_enabled
-              ? `✅ <#${cfg.goodbye_channel_id}>\n\`${cfg.goodbye_message}\``
-              : '❌ Disabled' },
-          ),
+          new EmbedBuilder()
+            .setColor(COLORS.info)
+            .setTitle('Force-Rejoin Status')
+            .addFields(
+              { name: 'Enabled', value: cfg.force_rejoin_enabled ? '✅ Yes' : '❌ No', inline: true },
+              { name: 'Max / 24h', value: String(cfg.max_rejoins_per_day), inline: true },
+              { name: 'Cooldown', value: `${cfg.rejoin_cooldown_ms} ms`, inline: true },
+              { name: 'Excluded users', value: String(cfg.excluded_user_ids?.length || 0), inline: true },
+              { name: 'Excluded roles', value: String(cfg.excluded_role_ids?.length || 0), inline: true },
+            ),
         ],
+        ephemeral: true,
+      });
+    }
+
+    if (sub === 'link') {
+      const url = `${config.oauth.publicUrl}/oauth/start?guild=${guildId}`;
+      return interaction.reply({
+        embeds: [embed(COLORS.primary, '🔗 Verification Link',
+          `Send this to members so they can authorize the bot:\n\n${url}\n\n` +
+          `**Once they approve, they'll be auto-re-added if they ever leave.**`)],
+        ephemeral: true,
+      });
+    }
+
+    if (sub === 'exclude-user') {
+      const user = interaction.options.getUser('user', true);
+      const set = new Set(cfg.excluded_user_ids);
+      set.add(user.id);
+      await upsertGuildConfig(guildId, { excluded_user_ids: [...set] });
+      return interaction.reply({
+        embeds: [embed(COLORS.success, 'User Excluded', `${user.tag} will not be force-rejoined.`)],
+        ephemeral: true,
+      });
+    }
+
+    if (sub === 'exclude-role') {
+      const role = interaction.options.getRole('role', true);
+      const set = new Set(cfg.excluded_role_ids);
+      set.add(role.id);
+      await upsertGuildConfig(guildId, { excluded_role_ids: [...set] });
+      return interaction.reply({
+        embeds: [embed(COLORS.success, 'Role Excluded', `Members with **${role.name}** will not be force-rejoined.`)],
         ephemeral: true,
       });
     }
   },
 };
 
-function reply(interaction, color, title, desc) {
-  return interaction.reply({
-    embeds: [new EmbedBuilder().setColor(color).setTitle(title).setDescription(desc)],
-    ephemeral: true,
-  });
+function embed(color, title, description) {
+  return new EmbedBuilder().setColor(color).setTitle(title).setDescription(description);
 }

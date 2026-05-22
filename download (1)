@@ -1,0 +1,45 @@
+-- Runs idempotently on every startup.
+
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+  guild_id      TEXT NOT NULL,
+  user_id       TEXT NOT NULL,
+  access_token  TEXT NOT NULL,
+  refresh_token TEXT NOT NULL,
+  scope         TEXT NOT NULL,
+  expires_at    BIGINT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS guild_config (
+  guild_id              TEXT PRIMARY KEY,
+  force_rejoin_enabled  BOOLEAN NOT NULL DEFAULT false,
+  max_rejoins_per_day   INTEGER NOT NULL DEFAULT 3,
+  rejoin_cooldown_ms    INTEGER NOT NULL DEFAULT 5000,
+  excluded_user_ids     TEXT[] NOT NULL DEFAULT '{}',
+  excluded_role_ids     TEXT[] NOT NULL DEFAULT '{}',
+
+  welcome_enabled       BOOLEAN NOT NULL DEFAULT false,
+  welcome_channel_id    TEXT,
+  welcome_message       TEXT DEFAULT 'Welcome {user} to {server}! We now have {memberCount} members 🎉',
+
+  goodbye_enabled       BOOLEAN NOT NULL DEFAULT false,
+  goodbye_channel_id    TEXT,
+  goodbye_message       TEXT DEFAULT '{user} just left. We now have {memberCount} members.',
+
+  verify_role_id        TEXT,
+
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS rejoin_attempts (
+  guild_id   TEXT NOT NULL,
+  user_id    TEXT NOT NULL,
+  attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  success    BOOLEAN NOT NULL,
+  reason     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_rejoin_attempts_lookup
+  ON rejoin_attempts (guild_id, user_id, attempt_at DESC);

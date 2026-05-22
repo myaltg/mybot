@@ -1,0 +1,131 @@
+// Data access layer.
+
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { pool, query } from './pool.js';
+import { logger } from '../utils/logger.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+export async function initDatabase() {
+  const sql = await fs.readFile(path.join(__dirname, 'schema.sql'), 'utf8');
+  await pool.query(sql);
+  logger.info('✅ Database schema ready');
+}
+
+/* ---------- guild_config ---------- */
+
+const DEFAULT_CONFIG = {
+  force_rejoin_enabled: false,
+  max_rejoins_per_day: 3,
+  rejoin_cooldown_ms: 5000,
+  excluded_user_ids: [],
+  excluded_role_ids: [],
+  welcome_enabled: false,
+  welcome_channel_id: null,
+  welcome_message: 'Welcome {user} to {server}! We now have {memberCount} members 🎉',
+  goodbye_enabled: false,
+  goodbye_channel_id: null,
+  goodbye_message: '{user} just left. We now have {memberCount} members.',
+  verify_role_id: null,
+};
+
+export async function getGuildConfig(guildId) {
+  const { rows } = await query('SELECT * FROM guild_config WHERE guild_id = $1', [guildId]);
+  if (!rows[0]) return { guild_id: guildId, ...DEFAULT_CONFIG };
+  return rows[0];
+}
+
+export async function upsertGuildConfig(guildId, patch) {
+  const current = await getGuildConfig(guildId);
+  const merged = { ...current, ...patch };
+  await query(
+    `INSERT INTO guild_config
+       (guild_id, force_rejoin_enabled, max_rejoins_per_day, rejoin_cooldown_ms,
+        excluded_user_ids, excluded_role_ids,
+        welcome_enabled, welcome_channel_id, welcome_message,
+        goodbye_enabled, goodbye_channel_id, goodbye_message,
+        verify_role_id, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now())
+     ON CONFLICT (guild_id) DO UPDATE SET
+       force_rejoin_enabled = EXCLUDED.force_rejoin_enabled,
+       max_rejoins_per_day  = EXCLUDED.max_rejoins_per_day,
+       rejoin_cooldown_ms   = EXCLUDED.rejoin_cooldown_ms,
+       excluded_user_ids    = EXCLUDED.excluded_user_ids,
+       excluded_role_ids    = EXCLUDED.excluded_role_ids,
+       welcome_enabled      = EXCLUDED.welcome_enabled,
+       welcome_channel_id   = EXCLUDED.welcome_channel_id,
+       welcome_message      = EXCLUDED.welcome_message,
+       goodbye_enabled      = EXCLUDED.goodbye_enabled,
+       goodbye_channel_id   = EXCLUDED.goodbye_channel_id,
+       goodbye_message      = EXCLUDED.goodbye_message,
+       verify_role_id       = EXCLUDED.verify_role_id,
+       updated_at           = now()`,
+    [
+      guildId,
+      merged.force_rejoin_enabled,
+      merged.max_rejoins_per_day,
+      merged.rejoin_cooldown_ms,
+      merged.excluded_user_ids,
+      merged.excluded_role_ids,
+      merged.welcome_enabled,
+      merged.welcome_channel_id,
+      merged.welcome_message,
+      merged.goodbye_enabled,
+      merged.goodbye_channel_id,
+      merged.goodbye_message,
+      merged.verify_role_id,
+    ]
+  );
+  return merged;
+}
+
+/* ---------- oauth_tokens ---------- */
+
+export async function saveTokens(guildId, userId, tokens) {
+  const expiresAt = Date.now() + (tokens.expires_in ?? 0) * 1000;
+  await query(
+    `INSERT INTO oauth_tokens (guild_id, user_id, access_token, refresh_token, scope, expires_at)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (guild_id, user_id) DO UPDATE SET
+       access_token  = EXCLUDED.access_token,
+       refresh_token = EXCLUDED.refresh_token,
+       scope         = EXCLUDED.scope,
+       expires_at    = EXCLUDED.expires_at,
+       updated_at    = now()`,
+    [guildId, userId, tokens.access_token, tokens.refresh_token, tokens.scope, expiresAt]
+  );
+}
+
+export async function getTokens(guildId, userId) {
+  const { rows } = await query(
+    'SELECT * FROM oauth_tokens WHERE guild_id = $1 AND user_id = $2',
+    [guildId, userId]
+  );
+  return rows[0] || null;
+}
+
+export async function deleteTokens(guildId, userId) {
+  await query('DELETE FROM oauth_tokens WHERE guild_id = $1 AND user_id = $2', [guildId, userId]);
+}
+
+/* ---------- rejoin_attempts (anti-loop) ---------- */
+
+export async function logRejoinAttempt(guildId, userId, success, reason) {
+  await query(
+    'INSERT INTO rejoin_attempts (guild_id, user_id, success, reason) VALUES ($1,$2,$3,$4)',
+    [guildId, userId, success, reason || null]
+  );
+}
+
+export async function countRecentRejoins(guildId, userId, withinMs) {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS c
+     FROM rejoin_attempts
+     WHERE guild_id = $1 AND user_id = $2
+       AND attempt_at >= now() - make_interval(secs => $3::float8 / 1000.0)`,
+    [guildId, userId, withinMs]
+  );
+  return rows[0]?.c ?? 0;
+}

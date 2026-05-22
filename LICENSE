@@ -1,0 +1,45 @@
+// Registers slash commands. Run once after changing command definitions.
+//
+//   npm run deploy:commands
+//
+// Set TEST_GUILD_ID in .env for instant per-guild registration during dev.
+// Leave empty to register globally (can take up to 1 hour to propagate).
+
+import 'dotenv/config';
+import { REST, Routes } from 'discord.js';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { config } from '../src/utils/config.js';
+import { logger } from '../src/utils/logger.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+async function loadCommandData() {
+  const dir = path.join(__dirname, '..', 'src', 'commands');
+  const files = await fs.readdir(dir);
+  const out = [];
+  for (const file of files.filter((f) => f.endsWith('.js'))) {
+    const mod = await import(path.join(dir, file));
+    const def = mod.default;
+    const items = Array.isArray(def) ? def : [def];
+    for (const cmd of items) {
+      if (cmd?.data) out.push(cmd.data.toJSON());
+    }
+  }
+  return out;
+}
+
+const rest = new REST({ version: '10' }).setToken(config.discord.token);
+
+const body = await loadCommandData();
+logger.info(`Deploying ${body.length} commands...`);
+
+const route = config.discord.testGuildId
+  ? Routes.applicationGuildCommands(config.discord.clientId, config.discord.testGuildId)
+  : Routes.applicationCommands(config.discord.clientId);
+
+const data = await rest.put(route, { body });
+logger.info(`✅ Deployed ${data.length} commands ${config.discord.testGuildId
+  ? `to guild ${config.discord.testGuildId}`
+  : 'globally'}.`);

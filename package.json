@@ -1,0 +1,42 @@
+// Central env-driven config. Loaded once at startup.
+import 'dotenv/config';
+
+function required(name) {
+  const v = process.env[name];
+  if (!v || !v.trim()) throw new Error(`Missing required env var: ${name}`);
+  return v.trim();
+}
+
+export const config = {
+  discord: {
+    token: required('DISCORD_TOKEN'),
+    clientId: required('CLIENT_ID'),
+    clientSecret: required('CLIENT_SECRET'),
+    testGuildId: process.env.TEST_GUILD_ID || null,
+  },
+  oauth: {
+    redirectUri: required('OAUTH_REDIRECT_URI'),
+    publicUrl: required('PUBLIC_URL').replace(/\/$/, ''),
+  },
+  web: {
+    port: Number(process.env.PORT || 3000),
+  },
+  db: {
+    url: process.env.DATABASE_URL || null,
+    host: process.env.PGHOST || 'localhost',
+    port: Number(process.env.PGPORT || 5432),
+    user: process.env.PGUSER || 'postgres',
+    password: process.env.PGPASSWORD || '',
+    database: process.env.PGDATABASE || 'rejoinbot',
+  },
+  env: process.env.NODE_ENV || 'development',
+};
+
+export const COLORS = {
+  primary: 0x5865f2,
+  success: 0x57f287,
+  error:   0xed4245,
+  warn:    0xfee75c,
+  info:    0x3498db,
+  muted:   0x99aab5,
+};
